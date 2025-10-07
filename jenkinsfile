@@ -1,1 +1,48 @@
 
+pipeline {
+    agent any
+    
+    tools {
+        // 配置工具版本
+        maven 'Maven-3.8'
+        jdk 'JDK-11'
+        nodejs 'NodeJS-16'
+    }
+    
+    stages {
+        stage('检出代码') {
+            steps {
+                git branch: 'main', 
+                    url: 'https://github.com/your-org/your-repo.git',
+                    credentialsId: 'github-cred'
+            }
+        }
+        
+        stage('构建') {
+            steps {
+                sh 'mvn clean compile -DskipTests'
+            }
+        }
+        
+        stage('测试') {
+            parallel {
+                stage('单元测试') {
+                    steps {
+                        sh 'mvn test'
+                    }
+                }
+                stage('集成测试') {
+                    steps {
+                        sh 'mvn verify -DskipUnitTests'
+                    }
+                }
+            }
+        }
+        
+        stage('部署') {
+            steps {
+                sh 'mvn deploy -DskipTests'
+            }
+        }
+    }
+}
