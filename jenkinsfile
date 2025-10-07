@@ -1,48 +1,174 @@
-
 pipeline {
     agent any
     
-    tools {
-        // 配置工具版本
-        maven 'Maven-3.8'
-        jdk 'JDK-11'
-        nodejs 'NodeJS-16'
+    parameters {
+        choice(
+            name: 'DEPLOY_ENV',
+            choices: ['dev', 'staging', 'prod'],
+            description: '选择部署环境'
+        )
+        booleanParam(
+            name: 'RUN_TESTS',
+            defaultValue: true,
+            description: '是否运行测试'
+        )
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Docker镜像标签'
+        )
+    }
+    
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
+        timestamps()
+    }
+    
+    environment {
+        // 全局环境变量
+        DOCKER_REGISTRY = 'registry.example.com'
+        PROJECT_NAME = 'my-project'
+        // 凭据环境变量
+        DOCKER_CREDENTIALS = credentials('docker-hub-cred')
+        SLACK_CHANNEL = '#ci-cd'
     }
     
     stages {
-        stage('检出代码') {
+        stage('代码检查') {
             steps {
-                git branch: 'main', 
-                    url: 'https://github.com/your-org/your-repo.git',
-                    credentialsId: 'github-cred'
+                script {
+                    echo "开始代码检查..."
+                    checkout scm
+                }
             }
         }
         
-        stage('构建') {
-            steps {
-                sh 'mvn clean compile -DskipTests'
+        stage('单元测试') {
+            when {
+                expression { params.RUN_TESTS }
             }
-        }
-        
-        stage('测试') {
-            parallel {
-                stage('单元测试') {
-                    steps {
+            steps {
+                script {
+                    echo "运行单元测试..."
+                    // 示例：使用不同的测试框架
+                    if (fileExists('pom.xml')) {
                         sh 'mvn test'
+                    } else if (fileExists('package.json')) {
+                        sh 'npm test'
+                    } else if (fileExists('requirements.txt')) {
+                        sh 'pytest'
                     }
                 }
-                stage('集成测试') {
-                    steps {
-                        sh 'mvn verify -DskipUnitTests'
+            }
+            post {
+                always {
+                    junit '**/target/surefire-reports/*.xml'  // Maven
+                    junit '**/test-results.xml'              // 其他框架
+                }
+            }
+        }
+        
+        stage('代码质量分析') {
+            steps {
+                script {
+                    echo "进行代码质量分析..."
+                    // SonarQube 分析
+                    if (fileExists('pom.xml')) {
+                        sh 'mvn sonar:sonar'
                     }
                 }
             }
         }
         
-        stage('部署') {
+        stage('构建镜像') {
             steps {
-                sh 'mvn deploy -DskipTests'
+                script {
+                    echo "构建Docker镜像..."
+                    sh """
+                        docker build -t ${env.DOCKER_REGISTRY}/${env.PROJECT_NAME}:${params.IMAGE_TAG} .
+                    """
+                }
             }
+        }
+        
+        stage('安全扫描') {
+            steps {
+                script {
+                    echo "进行安全扫描..."
+                    sh "trivy image ${env.DOCKER_REGISTRY}/${env.PROJECT_NAME}:${params.IMAGE_TAG}"
+                }
+            }
+        }
+        
+        stage('部署到测试环境') {
+            when {
+                expression { 
+                    params.DEPLOY_ENV == 'dev' || params.DEPLOY_ENV == 'staging' 
+                }
+            }
+            steps {
+                script {
+                    echo "部署到 ${params.DEPLOY_ENV} 环境"
+                    // 这里可以根据环境使用不同的部署脚本
+                    sh "./deploy.sh ${params.DEPLOY_ENV}"
+                }
+            }
+        }
+        
+        stage('部署到生产环境') {
+            when {
+                expression { params.DEPLOY_ENV == 'prod' }
+                beforeInput true
+            }
+            input {
+                message "确认部署到生产环境?"
+                ok "确认部署"
+                parameters {
+                    choice(
+                        name: 'CONFIRM_DEPLOY',
+                        choices: ['YES', 'NO'],
+                        description: '确认部署到生产环境'
+                    )
+                }
+            }
+            steps {
+                script {
+                    echo "开始生产环境部署..."
+                    sh "./deploy.sh production"
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo "流水线执行完成"
+            cleanWs()  // 清理工作空间
+        }
+        success {
+            script {
+                echo "构建成功!"
+                // slackSend channel: env.SLACK_CHANNEL, message: "构建 ${env.JOB_NAME} #${env.BUILD_NUMBER} 成功"
+            }
+        }
+        failure {
+            script {
+                echo "构建失败!"
+                // slackSend channel: env.SLACK_CHANNEL, message: "构建 ${env.JOB_NAME} #${env.BUILD_NUMBER} 失败"
+                emailext (
+                    subject: "构建失败: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                    body: "检查构建详情: ${env.BUILD_URL}",
+                    to: "devops@example.com"
+                )
+            }
+        }
+        unstable {
+            echo "测试失败，构建状态为不稳定"
+        }
+        changed {
+            echo "构建状态发生变化"
         }
     }
 }
